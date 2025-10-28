@@ -3,4 +3,4 @@ uvicorn[standard]
 python-dotenv
 openai
 numpy
-hyperon
+pydantic
