@@ -1,0 +1,9 @@
+
+openai
+python-dotenv
+numpy
+requests
+
+# hyperon
+uagents
+uagents-core

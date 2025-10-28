@@ -1,0 +1,23 @@
+Demo Script (3-5 minutes)
+
+1) One-line intro (15s)
+   - "Hello, we built a modular Mental Health chatbot using MeTTa, OpenAI, and Agentverse uAgents."
+
+2) System overview (30s)
+   - Show architecture diagram verbally: Client Agent -> Server Agent -> Chatbot Service (MeTTa + embeddings) -> OpenAI.
+
+3) Live demo (90s)
+   - Start server agent (show logs).
+   - Start client agent (show prompt), enter: "I'm feeling anxious at work — what can I do?"
+   - Show server receives query, background task processing, and reply returned.
+   - Point out 'sources' metadata printed with the reply to show RAG.
+
+4) Explain safety (30s)
+   - Show system prompt includes crisis guidance; mention emergency resources are provided.
+
+5) Implementation highlights (30s)
+   - Mention modular separation: agents are lightweight, heavy work in `chatbot_service.py`.
+   - Mention using `text-embedding-3-small` for embeddings and how we ensured dimension consistency.
+
+6) Wrap up (15s)
+   - "This is extensible — more agents (triage, referral) can be added. Links & code are in the repo."
