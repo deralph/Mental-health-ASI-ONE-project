@@ -3,7 +3,7 @@ import os
 import time
 import json
 from typing import List, Optional, Dict, Any
-
+from dotenv import load_dotenv
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,6 +14,8 @@ from openai import OpenAI
 # Must be in the same folder:
 #   knowledge_base.py  -> defines KNOWLEDGE_BASE: List[dict]
 from knowledge_base import KNOWLEDGE_BASE
+
+load_dotenv()
 
 # ---- Environment & OpenAI ----
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

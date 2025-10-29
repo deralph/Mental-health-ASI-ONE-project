@@ -1,2 +1,14 @@
 /venv
 .env
+
+project.db
+data
+postman
+esticore-pair.pem
+__pycache__/
+*.pyc
+__pycache__
+__pycache__/
+*.py[cod]
+.kiro
+ecadoc-pair.pem
