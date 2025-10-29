@@ -1,26 +1,58 @@
-# app.py
+"""
+Fixed and improved FastAPI app for the Mental Health Chatbot.
+Notes:
+ - Loads .env relative to this file (so your .env next to app.py will be found).
+ - Validates OPENAI_API_KEY and creates OpenAI client.
+ - Startup loads and normalizes embeddings from knowledge_base.KNOWLEDGE_BASE.
+ - Robust error handling for embeddings/chat calls.
+ - Fixed catch-all route and minor bugs.
+ - Run with: `uvicorn app:app --reload --port 8000`
+
+Dependencies:
+ pip install fastapi uvicorn python-dotenv numpy openai pydantic
+ (adjust package names to match the OpenAI SDK you use)
+"""
+
+from __future__ import annotations
+
 import os
 import time
-import json
+import logging
+from pathlib import Path
 from typing import List, Optional, Dict, Any
+
 from dotenv import load_dotenv
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+# OpenAI Python client (ensure you have the correct package/version installed)
 from openai import OpenAI
 
 # ---- Load knowledge base (pure Python, no Hyperon) ----
 # Must be in the same folder:
 #   knowledge_base.py  -> defines KNOWLEDGE_BASE: List[dict]
-from knowledge_base import KNOWLEDGE_BASE
+try:
+    from knowledge_base import KNOWLEDGE_BASE  # type: ignore
+except Exception as e:
+    KNOWLEDGE_BASE = []  # will be validated at startup
 
-load_dotenv()
+# ---- load .env relative to this file (safer when running from different cwd) ----
+BASE_DIR = Path(__file__).resolve().parent
+dotenv_path = BASE_DIR / ".env"
+if dotenv_path.exists():
+    load_dotenv(dotenv_path=dotenv_path)
+else:
+    # fallback to default loader (environment-only)
+    load_dotenv()
 
 # ---- Environment & OpenAI ----
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
-    raise RuntimeError("Set OPENAI_API_KEY env var before starting the server")
+    raise RuntimeError("Set OPENAI_API_KEY env var before starting the server (check .env or env vars)")
+
+# create OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ---- FastAPI app ----
@@ -30,7 +62,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS (adjust origins as needed for Agentverse / ASI:One)
+# CORS (adjust origins as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,13 +72,12 @@ app.add_middleware(
 )
 
 # ---- Globals initialized at startup ----
-EMBEDDING_DIM: int = 1536
+EMBEDDING_DIM: int = 0
 EMB_MATRIX: Optional[np.ndarray] = None  # normalized embeddings [N, d]
 KB_ITEMS: List[Dict[str, Any]] = []      # mirrors KNOWLEDGE_BASE (filtered if needed)
 
 
 # ========= Models =========
-
 class ChatRequest(BaseModel):
     query: str = Field(..., description="User question")
     top_k: int = Field(3, ge=1, le=10, description="How many chunks to retrieve")
@@ -81,7 +112,9 @@ def _normalize_rows(mat: np.ndarray) -> np.ndarray:
 
 
 def _get_query_embedding(text: str, model: str) -> np.ndarray:
+    """Call OpenAI to get an embedding and return a normalized numpy vector."""
     resp = client.embeddings.create(model=model, input=text)
+    # response shape assumed: resp.data[0].embedding
     vec = np.array(resp.data[0].embedding, dtype=np.float32)
     n = np.linalg.norm(vec)
     if n == 0:
@@ -92,10 +125,14 @@ def _get_query_embedding(text: str, model: str) -> np.ndarray:
 def _semantic_search(
     query: str, top_k: int, threshold: float, embed_model: str
 ) -> List[Dict[str, Any]]:
+    global EMB_MATRIX, KB_ITEMS
+    if EMB_MATRIX is None or len(KB_ITEMS) == 0:
+        raise RuntimeError("Embeddings matrix not initialized on startup")
+
     q_emb = _get_query_embedding(query, model=embed_model)
     scores = EMB_MATRIX @ q_emb  # cosine because both are normalized
 
-    # pick more than top_k, then threshold + trim
+    # pick more than top_k, then apply threshold + trim
     idxs = np.argsort(-scores)[: top_k * 3]
     results: List[Dict[str, Any]] = []
     for i in idxs:
@@ -105,10 +142,10 @@ def _semantic_search(
         item = KB_ITEMS[i]
         results.append(
             {
-                "chunk_id": item["chunk_id"],
-                "text": item["text"],
-                "source": item["source"],
-                "page": item["page"],
+                "chunk_id": item.get("chunk_id", str(i)),
+                "text": item.get("text", ""),
+                "source": item.get("source", "unknown"),
+                "page": int(item.get("page", 0)),
                 "score": round(score, 4),
             }
         )
@@ -142,21 +179,27 @@ def _safety_footer() -> str:
 
 
 # ========= FastAPI Lifecycle =========
-
 @app.on_event("startup")
 def _startup():
     global KB_ITEMS, EMB_MATRIX, EMBEDDING_DIM
+
+    logging.info("startup: loading knowledge base and embeddings")
 
     if not KNOWLEDGE_BASE:
         raise RuntimeError("KNOWLEDGE_BASE is empty. Ensure knowledge_base.py is present and populated.")
 
     # Ensure consistent dimension; keep only rows with the modal dimension
-    dims = {}
+    dims: Dict[int, int] = {}
     for it in KNOWLEDGE_BASE:
         d = len(it.get("embedding", []))
         dims[d] = dims.get(d, 0) + 1
-    # choose the most common dim
-    EMBEDDING_DIM = max(dims, key=lambda k: dims[k])
+
+    # choose the most common dim (ignore 0-length embeddings)
+    dims_filtered = {k: v for k, v in dims.items() if k > 0}
+    if not dims_filtered:
+        raise RuntimeError("No non-empty embeddings found in knowledge base.")
+
+    EMBEDDING_DIM = max(dims_filtered, key=lambda k: dims_filtered[k])
 
     filtered = [it for it in KNOWLEDGE_BASE if len(it.get("embedding", [])) == EMBEDDING_DIM]
 
@@ -167,11 +210,10 @@ def _startup():
     emb_matrix = np.array([it["embedding"] for it in KB_ITEMS], dtype=np.float32)
     EMB_MATRIX = _normalize_rows(emb_matrix)
 
-    print(f"[startup] Loaded {len(KB_ITEMS)} KB items with dim={EMBEDDING_DIM}")
+    logging.info(f"[startup] Loaded {len(KB_ITEMS)} KB items with dim={EMBEDDING_DIM}")
 
 
 # ========= Endpoints =========
-
 @app.get("/health")
 def health():
     return {"status": "ok", "kb_items": len(KB_ITEMS), "embedding_dim": EMBEDDING_DIM}
@@ -180,6 +222,7 @@ def health():
 @app.post("/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest):
     t0 = time.time()
+
     try:
         results = _semantic_search(
             query=payload.query,
@@ -188,6 +231,7 @@ def chat(payload: ChatRequest):
             embed_model=payload.embed_model,
         )
     except Exception as e:
+        logging.exception("Embedding/search error")
         raise HTTPException(status_code=500, detail=f"Embedding/search error: {e}")
 
     messages = _build_messages(payload.query, results)
@@ -199,8 +243,23 @@ def chat(payload: ChatRequest):
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
         )
-        answer = completion.choices[0].message.content
+        # robust extraction of text from returned choice
+        choice = completion.choices[0]
+        # new SDK may return .message.content or .message['content']
+        answer = ""
+        try:
+            # try attribute style
+            answer = choice.message.content
+        except Exception:
+            # try dict-like fallback
+            try:
+                answer = choice["message"]["content"]  # type: ignore
+            except Exception:
+                # last-resort fallbacks
+                answer = getattr(choice, "text", "") or ""
+
     except Exception as e:
+        logging.exception("OpenAI chat error")
         raise HTTPException(status_code=500, detail=f"OpenAI chat error: {e}")
 
     if payload.safety_note:
@@ -222,3 +281,16 @@ def chat(payload: ChatRequest):
         retrieved_context=[r["text"] for r in results],
         timing_ms=timing_ms,
     )
+
+
+# catch-all route (fixed) - useful for single-page-app fallback in some deployments
+@app.get("/{full_path:path}")
+def any_route(full_path: str):
+    return {"status": "ok", "any_route": True, "path": full_path}
+
+
+# allow running directly for local dev
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
